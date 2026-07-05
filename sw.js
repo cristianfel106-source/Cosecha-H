@@ -1,16 +1,19 @@
-const CACHE_NAME = "cosechas-cas-v2";
+const CACHE_NAME = "cosechas-cas-v3";
 
-const APP_SHELL = [
+// Estos archivos SIEMPRE se intenta traer de internet primero (para que
+// las actualizaciones se vean de inmediato); si no hay señal, se usa la
+// última copia guardada.
+const NETWORK_FIRST = [
   "./index.html",
   "./manifest.json",
+];
+
+// Estos casi nunca cambian, así que sí conviene servirlos directo desde
+// la copia guardada (más rápido, y son pesados para descargar cada vez).
+const CACHE_FIRST = [
   "./icon-192.png",
   "./icon-512.png",
   "./icon-512-maskable.png",
-];
-
-// El SDK de Firebase se cachea aparte: así la app puede arrancar sin
-// internet una vez que se instaló/abrió al menos una vez con señal.
-const CDN_SHELL = [
   "https://www.gstatic.com/firebasejs/12.15.0/firebase-app.js",
   "https://www.gstatic.com/firebasejs/12.15.0/firebase-firestore.js",
 ];
@@ -18,13 +21,12 @@ const CDN_SHELL = [
 self.addEventListener("install", (event) => {
   event.waitUntil((async () => {
     const cache = await caches.open(CACHE_NAME);
-    await cache.addAll(APP_SHELL);
-    // Se cachean uno por uno (con manejo de errores) para que un fallo de
-    // red puntual no impida instalar el resto de la app.
+    // Se cachea cada archivo por separado: si uno falla (sin señal en ese
+    // instante) no impide que el resto quede instalado.
     await Promise.all(
-      CDN_SHELL.map(async (url) => {
+      [...NETWORK_FIRST, ...CACHE_FIRST].map(async (url) => {
         try {
-          const res = await fetch(url, { mode: "cors" });
+          const res = await fetch(url, { mode: url.startsWith("http") ? "cors" : "same-origin" });
           if (res.ok) await cache.put(url, res);
         } catch (e) { /* se descargará en el siguiente intento con señal */ }
       })
@@ -51,19 +53,33 @@ self.addEventListener("fetch", (event) => {
   if (req.method !== "GET") return;
 
   const isOwnFile = req.url.startsWith(self.location.origin);
-  const isCdnShell = CDN_SHELL.includes(req.url);
-  if (!isOwnFile && !isCdnShell) return; // deja pasar (Firestore, analytics, etc.)
+  const isCacheFirst = CACHE_FIRST.includes(req.url);
+  const isNetworkFirst = NETWORK_FIRST.some((p) => req.url.endsWith(p.replace("./", "")));
+  if (!isOwnFile && !isCacheFirst) return; // deja pasar (Firestore, analytics, etc.)
 
-  event.respondWith(
-    caches.match(req).then((cached) => {
-      if (cached) return cached;
-      return fetch(req)
+  if (isNetworkFirst) {
+    // Red primero: si hay señal, siempre trae la versión más nueva.
+    event.respondWith(
+      fetch(req)
         .then((response) => {
           const copy = response.clone();
           caches.open(CACHE_NAME).then((cache) => cache.put(req, copy));
           return response;
         })
-        .catch(() => (isOwnFile ? caches.match("./index.html") : undefined));
+        .catch(() => caches.match(req).then((c) => c || caches.match("./index.html")))
+    );
+    return;
+  }
+
+  // Caché primero (íconos, SDK de Firebase): más rápido, casi no cambian.
+  event.respondWith(
+    caches.match(req).then((cached) => {
+      if (cached) return cached;
+      return fetch(req).then((response) => {
+        const copy = response.clone();
+        caches.open(CACHE_NAME).then((cache) => cache.put(req, copy));
+        return response;
+      });
     })
   );
 });
