@@ -1,9 +1,9 @@
-!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="es">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-<title>Cosechas-H </title>
+<title>Cosechas · CAS</title>
 <link rel="manifest" href="./manifest.json">
 <meta name="theme-color" content="#2F4A33">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -517,7 +517,9 @@ let state = {
   draft: null,            // reporte en edición
   search: "",
   viewingId: null,
+  editing: false,          // true cuando el formulario está editando un registro existente
   resumenFecha: new Date().toISOString().slice(0,10),
+  resumenExpanded: new Set(),
 };
 
 onSnapshot(
@@ -589,9 +591,11 @@ const ICONS = {
   close: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg>`,
   plus: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>`,
   trash: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a1 1 0 011-1h6a1 1 0 011 1v2m2 0-1 14a1 1 0 01-1 1H7a1 1 0 01-1-1L5 6"/></svg>`,
+  edit: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9M16.5 3.5a2.12 2.12 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>`,
   download: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 21h16"/></svg>`,
   search: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.35-4.35"/></svg>`,
   chart: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18M8 17V10M13 17V6M18 17v-4"/></svg>`,
+  chevron: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>`,
   check: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>`,
 };
 
@@ -617,9 +621,9 @@ function renderHome(){
     const q = state.search.toLowerCase();
     return [r.supervisor, r.finca, r.equipo].join(" ").toLowerCase().includes(q);
   });
-  const tot = totalesGlobales(reports);
   const hoy = new Date().toISOString().slice(0,10);
-  const totHoy = totalesGlobales(reports.filter(r=>r.fecha===hoy));
+  const reportesHoy = reports.filter(r=>r.fecha===hoy);
+  const totHoy = totalesGlobales(reportesHoy);
 
   return `
     <header class="topbar">
@@ -639,7 +643,7 @@ function renderHome(){
 
       <div class="stat-row">
         <div class="stat-card"><div class="n">${fmtNum(totHoy.toneladas)}</div><div class="l">Toneladas hoy</div></div>
-        <div class="stat-card"><div class="n">${fmtNum(tot.toneladas)}</div><div class="l">Toneladas totales</div></div>
+        <div class="stat-card"><div class="n">${reportesHoy.length}</div><div class="l">Reportes hoy</div></div>
       </div>
 
       <div class="section-title">
@@ -692,7 +696,7 @@ function renderForm1(){
     <header class="topbar">
       <button class="icon-btn" id="btnBack">${ICONS.back}</button>
       <div>
-        <span class="eyebrow">Nuevo registro</span>
+        <span class="eyebrow">${state.editing ? "Editar registro" : "Nuevo registro"}</span>
         <h1 style="font-size:19px">Reporte</h1>
       </div>
     </header>
@@ -792,7 +796,7 @@ function renderForm2(){
 
       <div class="form-actions">
         <button class="btn btn-ghost" id="btnAtras2">Atrás</button>
-        <button class="btn btn-primary" id="btnGuardar" ${d.items.length? "" : "disabled"}>Guardar registro</button>
+        <button class="btn btn-primary" id="btnGuardar" ${d.items.length? "" : "disabled"}>${state.editing ? "Guardar cambios" : "Guardar registro"}</button>
       </div>
     </main>
   `;
@@ -813,6 +817,7 @@ function renderDetail(){
         <span class="eyebrow">Registro</span>
         <h1 style="font-size:19px">${r.finca || "Reporte"}</h1>
       </div>
+      <button class="icon-btn" id="btnEditReport" title="Editar">${ICONS.edit}</button>
       <button class="icon-btn" id="btnDelReport" title="Eliminar" style="border-color:var(--danger); color:#ffd9d0">${ICONS.trash}</button>
     </header>
     <main>
@@ -877,7 +882,12 @@ function renderResumen(){
   const itemsDelDia = [];
   reports.forEach(r=> r.items.forEach(it=> itemsDelDia.push({...it, finca:r.finca, supervisor:r.supervisor})));
 
-  const porProducto = groupBy(itemsDelDia, it=>productoById(it.productoId).nombre);
+  const porProductoDetalle = PRODUCTOS.map(p=>{
+    const items = itemsDelDia.filter(it=>it.productoId===p.id);
+    const tot = items.reduce((a,it)=>{ a.unidades+=Number(it.unidades)||0; a.toneladas+=Number(it.toneladas)||0; return a; }, {unidades:0, toneladas:0});
+    const porMedida = groupBy(items, it=>it.medida);
+    return { producto:p, tot, porMedida };
+  });
   const porFinca = groupBy(itemsDelDia, it=>it.finca);
   const porSupervisor = groupBy(itemsDelDia, it=>it.supervisor);
 
@@ -890,7 +900,7 @@ function renderResumen(){
         <div class="bar-value">${fmtNum(g.toneladas)} t</div>
       </div>`;
   };
-  const maxProd = Math.max(1, ...porProducto.map(([,g])=>g.toneladas));
+  const maxProd = Math.max(1, ...porProductoDetalle.map(pd=>pd.tot.toneladas));
   const maxFinca = Math.max(1, ...porFinca.map(([,g])=>g.toneladas));
   const maxSup = Math.max(1, ...porSupervisor.map(([,g])=>g.toneladas));
 
@@ -917,10 +927,31 @@ function renderResumen(){
       ${reports.length===0 ? `
         <div class="empty-state">Nadie ha registrado cosecha este día todavía.</div>
       ` : `
-        <div class="section-title"><h3>Por producto</h3></div>
-        <div class="detail-block">
-          ${porProducto.map(([nombre,g])=>barra(nombre,g,maxProd)).join("")}
-        </div>
+        <div class="section-title"><h3>Por producto</h3><span class="count">Toca para ver detalle</span></div>
+        ${porProductoDetalle.map(({producto:p, tot:pt, porMedida})=>{
+          const expanded = state.resumenExpanded.has(p.id);
+          const pct = maxProd>0 ? Math.max(4, Math.round((pt.toneladas/maxProd)*100)) : 0;
+          return `
+          <div class="product-card ${p.clase}">
+            <button class="p-head resumen-toggle" data-toggle="${p.id}" style="width:100%; text-align:left; border:none; background:none; cursor:pointer;">
+              <div class="p-info">
+                <div class="p-name">${p.nombre}</div>
+                <div class="bar-track" style="margin-top:6px;"><div class="bar-fill" style="width:${pct}%"></div></div>
+                <div class="p-total" style="margin-top:6px;"><b>${fmtNum(pt.unidades)}</b> unid · <b>${fmtNum(pt.toneladas)}</b> t</div>
+              </div>
+              <span style="flex:none; transform:rotate(${expanded?90:0}deg); transition:transform .15s ease; color:var(--ink-soft); width:18px; height:18px;">${ICONS.chevron}</span>
+            </button>
+            ${expanded ? `
+            <div class="p-items">
+              ${porMedida.length===0 ? `<div class="p-item"><span class="desc" style="color:var(--ink-soft);">Nadie registró este producto todavía.</span></div>` :
+                porMedida.map(([medida,g])=>`
+                <div class="p-item">
+                  <span class="desc">${medida}</span>
+                  <span class="figs">${fmtNum(g.unidades)} u · ${fmtNum(g.toneladas)} t</span>
+                </div>`).join("")}
+            </div>` : ""}
+          </div>`;
+        }).join("")}
 
         <div class="section-title"><h3>Por finca</h3></div>
         <div class="detail-block">
@@ -1027,6 +1058,7 @@ function bind(){
   if(state.view==="home"){
     document.getElementById("btnNuevo").onclick = ()=>{
       state.draft = newDraft();
+      state.editing = false;
       state.view = "form1";
       render();
     };
@@ -1051,13 +1083,21 @@ function bind(){
       state.resumenFecha = e.target.value;
       render();
     };
+    document.querySelectorAll("[data-toggle]").forEach(btn=>{
+      btn.onclick = ()=>{
+        const id = btn.dataset.toggle;
+        if(state.resumenExpanded.has(id)) state.resumenExpanded.delete(id);
+        else state.resumenExpanded.add(id);
+        render();
+      };
+    });
     document.querySelectorAll(".report-card").forEach(card=>{
       card.onclick = ()=>{ state.viewingId = card.dataset.id; state.view="detail"; render(); };
     });
   }
 
   if(state.view==="form1"){
-    document.getElementById("btnBack").onclick = ()=>{ state.view="home"; state.draft=null; render(); };
+    document.getElementById("btnBack").onclick = ()=>{ state.view="home"; state.draft=null; state.editing=false; render(); };
     const form1 = document.getElementById("formStep1");
     // Quita el estado de error apenas el usuario corrige el campo
     form1.querySelectorAll(".control").forEach(el=>{
@@ -1136,24 +1176,40 @@ function bind(){
     });
     const btnGuardar = document.getElementById("btnGuardar");
     if(btnGuardar) btnGuardar.onclick = ()=>{
+      const wasEditing = state.editing;
       const reportToSave = { ...state.draft };
+      if(wasEditing) reportToSave.actualizado = new Date().toISOString();
       // setDoc funciona igual con o sin señal: si no hay internet, Firestore
       // lo guarda en el celular y lo sube solo apenas vuelva la conexión.
       setDoc(doc(reportsCol, reportToSave.id), reportToSave).catch(err=>{
         console.error(err);
         toast("No se pudo guardar. Intenta de nuevo.");
       });
-      if(!state.reports.find(r=>r.id===reportToSave.id)) state.reports.unshift(reportToSave);
+      const idx = state.reports.findIndex(r=>r.id===reportToSave.id);
+      if(idx>=0) state.reports[idx] = reportToSave;
+      else state.reports.unshift(reportToSave);
       state.viewingId = reportToSave.id;
       state.draft = null;
+      state.editing = false;
       state.view = "detail";
       render();
-      toast(navigator.onLine ? "Registro guardado" : "Guardado — se subirá cuando vuelva la señal");
+      toast(navigator.onLine ? (wasEditing ? "Cambios guardados" : "Registro guardado") : "Guardado — se subirá cuando vuelva la señal");
     };
   }
 
   if(state.view==="detail"){
     document.getElementById("btnBack").onclick = ()=>{ state.view="home"; state.viewingId=null; render(); };
+    document.getElementById("btnEditReport").onclick = ()=>{
+      const r = state.reports.find(x=>x.id===state.viewingId);
+      if(!r) return;
+      state.draft = {
+        ...r,
+        items: r.items.map(it=>({...it})),
+      };
+      state.editing = true;
+      state.view = "form1";
+      render();
+    };
     document.getElementById("btnDelReport").onclick = ()=>{
       if(confirm("¿Eliminar este registro? Esta acción no se puede deshacer.")){
         const idToDelete = state.viewingId;
@@ -1232,7 +1288,5 @@ if ("serviceWorker" in navigator && (location.protocol === "https:" || location.
 render();
 updateNetBanner();
 </script>
-  </body>
-</html>
 </body>
 </html>
