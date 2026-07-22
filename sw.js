@@ -1,4 +1,4 @@
-const CACHE_NAME = "cosechas-cas-v3";
+const CACHE_NAME = "cosechas-cas-v4";
 
 // Estos archivos SIEMPRE se intenta traer de internet primero (para que
 // las actualizaciones se vean de inmediato); si no hay señal, se usa la
@@ -16,6 +16,7 @@ const CACHE_FIRST = [
   "./icon-512-maskable.png",
   "https://www.gstatic.com/firebasejs/12.15.0/firebase-app.js",
   "https://www.gstatic.com/firebasejs/12.15.0/firebase-firestore.js",
+  "https://cdn.jsdelivr.net/npm/chart.js@4.4.9/dist/chart.umd.min.js",
 ];
 
 self.addEventListener("install", (event) => {
