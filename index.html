@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-<title>Cosechas · H</title>
+<title>Cosechas · CAS</title>
 <link rel="manifest" href="./manifest.json">
 <meta name="theme-color" content="#2F4A33">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -307,6 +307,9 @@
   .form-actions{
     display:flex; gap:10px; margin-top:26px;
   }
+  .quick-row{ display:flex; gap:10px; margin:0 0 8px; }
+  .btn-sm{ padding:10px; font-size:12.5px; flex:1; }
+  .btn-sm svg{ width:15px; height:15px; }
   .btn{
     flex:1; padding:14px; border-radius:var(--radius-m);
     border:none; font-weight:700; font-size:14.5px; cursor:pointer;
@@ -449,6 +452,16 @@
   .bar-track{ height:8px; background:var(--surface-2); border:1px solid var(--line); border-radius:20px; overflow:hidden; }
   .bar-fill{ height:100%; background:var(--primary); border-radius:20px; }
   .bar-value{ font-family:var(--font-mono); font-size:12px; color:var(--ink-soft); margin-top:4px; text-align:right; }
+
+  .choice-card{
+    display:block; width:100%; text-align:left;
+    background:var(--surface); border:1px solid var(--line); border-left:6px solid var(--primary);
+    border-radius:var(--radius-m); padding:18px; margin-bottom:12px; cursor:pointer;
+    transition:box-shadow .15s ease, transform .12s ease;
+  }
+  .choice-card:hover{ box-shadow:var(--shadow); transform:translateY(-1px); }
+  .choice-name{ font-family:var(--font-display); font-weight:600; font-size:17px; }
+  .choice-sub{ font-size:12.5px; color:var(--ink-soft); margin-top:4px; }
 </style>
 </head>
 <body>
@@ -485,6 +498,7 @@ const db = initializeFirestore(firebaseApp, {
   localCache: persistentLocalCache({ tabManager: persistentSingleTabManager() })
 });
 const reportsCol = collection(db, "reportes");
+const despachosCol = collection(db, "despachos");
 
 /* =========================================================
    DATOS FIJOS (extraídos de APP_INVENTARIOS.xlsx)
@@ -504,6 +518,46 @@ const PRODUCTOS = [
 ];
 const productoById = id => PRODUCTOS.find(p=>p.id===id);
 
+/* ---- Despachos Cosecha (hoja "DESPACHOS COSECHA") ---- */
+const DESPACHO_CLIENTES = ["HUGO ALONZO MUNERA GONZALES","RINCCO S.A.S. ASERRINCCO","PRIMADERA S.A.S.","AROS & AROS","TRIPLEX Y MADERA (GONZALO)","CLAUDIA YEPES","MADERAS SAN CASIMIRO","MADERAS RENOVABLES","INNOVAR"];
+const DESPACHO_PRODUCTOS = ["ASERRIO","ASTILLABLE","ESTACONES"];
+const DESPACHO_PROCESOS = ["VENTA","AUTOCONSUMO"];
+
+/* ---- Despachos Aserrinco (hoja "DESPACHOS ASERINCCO") ---- */
+const ASERRINCO_CLIENTES = ["Bodega en Sabaneta, Antioquia","Tienda en Guayabal, Antioquia"];
+const ASERRINCO_PRODUCTOS = ["Estacones","Larguero Inmunizado-Estructural","Tabla Aserrada Inmunizada - Deck y Cerramiento","Varillón Aserrado-Inmunizado","Viruta"];
+const ASERRINCO_DIAMETROS = ["7","9","10","12","14","8x4","10x2,5","8x2,5","4x4","4x2","Bulto"];
+const ASERRINCO_LARGOS = ["2","2,2","2,5","3","4"];
+
+/* Configuración de cada tipo de despacho: qué campos mostrar y en qué orden */
+const DESPACHO_TIPOS = {
+  cosecha: {
+    label: "Despacho Cosecha",
+    unidadLabel: "Toneladas",
+    campos: [
+      { name:"cliente", label:"Cliente", tipo:"select", opciones:DESPACHO_CLIENTES, req:true },
+      { name:"producto", label:"Producto", tipo:"select", opciones:DESPACHO_PRODUCTOS, req:true },
+      { name:"proceso", label:"Proceso", tipo:"select", opciones:DESPACHO_PROCESOS, req:true },
+      { name:"remision", label:"Remisión", tipo:"text", req:false },
+      { name:"placa", label:"Placa", tipo:"text", req:false },
+      { name:"toneladas", label:"Toneladas", tipo:"number", req:false },
+    ],
+  },
+  aserrinco: {
+    label: "Despacho Aserrinco",
+    unidadLabel: "Unidades",
+    campos: [
+      { name:"cliente", label:"Cliente", tipo:"select", opciones:ASERRINCO_CLIENTES, req:true },
+      { name:"producto", label:"Producto", tipo:"select", opciones:ASERRINCO_PRODUCTOS, req:true },
+      { name:"diametro", label:"Diámetro/Espesor (cm)", tipo:"select", opciones:ASERRINCO_DIAMETROS, req:true },
+      { name:"largo", label:"Largo (m)", tipo:"select", opciones:ASERRINCO_LARGOS, req:true },
+      { name:"remision", label:"Remisión", tipo:"text", req:false },
+      { name:"placa", label:"Placa", tipo:"text", req:false },
+      { name:"unidades", label:"Unidades", tipo:"number", req:false },
+    ],
+  },
+};
+
 /* =========================================================
    ESTADO Y SINCRONIZACIÓN EN TIEMPO REAL (Firestore)
    Cada dispositivo escucha la colección "reportes". Cuando hay
@@ -512,7 +566,7 @@ const productoById = id => PRODUCTOS.find(p=>p.id===id);
    apenas vuelva la conexión (no requiere código adicional).
    ========================================================= */
 let state = {
-  view: "home",          // home | form1 | form2 | detail | resumen
+  view: "home",          // home | form1 | form2 | detail | resumen | despachos | despachoTipo | despachoForm | despachoDetail
   reports: [],
   draft: null,            // reporte en edición
   search: "",
@@ -520,6 +574,12 @@ let state = {
   editing: false,          // true cuando el formulario está editando un registro existente
   resumenFecha: new Date().toISOString().slice(0,10),
   resumenExpanded: new Set(),
+  despachos: [],
+  despachoDraft: null,
+  despachoTipo: null,      // "cosecha" | "aserrinco"
+  despachoEditing: false,
+  viewingDespachoId: null,
+  despachoSearch: "",
 };
 
 onSnapshot(
@@ -527,6 +587,18 @@ onSnapshot(
   (snapshot)=>{
     state.reports = snapshot.docs.map(d=>d.data());
     if(["home","detail","resumen"].includes(state.view)) render();
+  },
+  (err)=>{
+    console.error(err);
+    toast("No se pudo sincronizar con el servidor");
+  }
+);
+
+onSnapshot(
+  query(despachosCol, orderBy("creado","desc")),
+  (snapshot)=>{
+    state.despachos = snapshot.docs.map(d=>d.data());
+    if(["despachos","despachoDetail"].includes(state.view)) render();
   },
   (err)=>{
     console.error(err);
@@ -596,6 +668,7 @@ const ICONS = {
   search: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.35-4.35"/></svg>`,
   chart: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18M8 17V10M13 17V6M18 17v-4"/></svg>`,
   chevron: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>`,
+  truck: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17V7a1 1 0 011-1h10v11H4a1 1 0 01-1-1z"/><path d="M14 10h4l3 3v4h-7v-7z"/><circle cx="7.5" cy="17.5" r="1.7"/><circle cx="17.5" cy="17.5" r="1.7"/></svg>`,
   check: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>`,
 };
 
@@ -639,7 +712,10 @@ function renderHome(){
       </div>
 
       <button class="btn-new" id="btnNuevo">${ICONS.plus} Nuevo registro</button>
-      <button class="btn btn-ghost" id="btnResumen" style="width:100%; margin-bottom:8px;">${ICONS.chart} Resumen del día</button>
+      <div class="quick-row">
+        <button class="btn btn-ghost btn-sm" id="btnResumen">${ICONS.chart} Resumen del día</button>
+        <button class="btn btn-ghost btn-sm" id="btnDespachos">${ICONS.truck} Despachos</button>
+      </div>
 
       <div class="stat-row">
         <div class="stat-card"><div class="n">${fmtNum(totHoy.toneladas)}</div><div class="l">Toneladas hoy</div></div>
@@ -981,6 +1057,192 @@ function renderResumen(){
 }
 
 /* =========================================================
+   DESPACHOS — lista, elegir tipo, formulario y detalle
+   ========================================================= */
+function newDespachoDraft(tipo){
+  const now = new Date();
+  const cfg = DESPACHO_TIPOS[tipo];
+  const draft = {
+    id: uid(),
+    tipo,
+    fecha: now.toISOString().slice(0,10),
+    hora: now.toTimeString().slice(0,5),
+    creado: now.toISOString(),
+  };
+  cfg.campos.forEach(c=> draft[c.name] = "");
+  return draft;
+}
+
+function renderDespachos(){
+  const despachos = [...state.despachos].sort((a,b)=> b.creado.localeCompare(a.creado));
+  const filtered = despachos.filter(d=>{
+    if(!state.despachoSearch) return true;
+    const q = state.despachoSearch.toLowerCase();
+    return [d.cliente, d.producto, d.remision, d.placa].join(" ").toLowerCase().includes(q);
+  });
+
+  return `
+    <header class="topbar">
+      <button class="icon-btn" id="btnBack">${ICONS.back}</button>
+      <h1>Despachos</h1>
+      <button class="icon-btn" id="btnExportDespachos" title="Exportar a Excel">${ICONS.download}</button>
+    </header>
+    <main>
+      <button class="btn-new" id="btnNuevoDespacho">${ICONS.plus} Nuevo despacho</button>
+
+      <div class="section-title">
+        <h3>Historial</h3>
+        <span class="count">${filtered.length} de ${despachos.length}</span>
+      </div>
+
+      ${despachos.length ? `
+      <div class="search-bar">
+        <input type="text" id="despachoSearchInput" placeholder="Buscar por cliente, producto, placa…" value="${state.despachoSearch.replace(/"/g,'&quot;')}">
+      </div>` : ""}
+
+      ${filtered.length===0 ? `
+        <div class="empty-state">${despachos.length? "No hay resultados para tu búsqueda." : "Aún no hay despachos registrados."}</div>
+      ` : filtered.map(d=>{
+        const cfg = DESPACHO_TIPOS[d.tipo];
+        const cantidad = d.tipo==="cosecha" ? `${fmtNum(d.toneladas)} t` : `${fmtNum(d.unidades)} u`;
+        return `
+        <div class="report-card" data-id="${d.id}">
+          <div class="row1">
+            <div class="predio">${d.cliente || "(sin cliente)"}</div>
+            <div class="fecha">${fmtFecha(d.fecha, d.hora)}</div>
+          </div>
+          <div class="meta">${d.producto || "—"}${d.remision? " · Rem. "+d.remision : ""}${d.placa? " · "+d.placa : ""}</div>
+          <div class="tags">
+            <span class="tag" style="background:var(--primary-tint); color:var(--primary-dark)">${cfg.label}</span>
+            <span class="tag" style="background:var(--accent-tint); color:var(--accent-dark)">${cantidad}</span>
+          </div>
+        </div>`;
+      }).join("")}
+    </main>
+  `;
+}
+
+function renderDespachoTipo(){
+  return `
+    <header class="topbar">
+      <button class="icon-btn" id="btnBack">${ICONS.back}</button>
+      <div>
+        <span class="eyebrow">Despachos</span>
+        <h1 style="font-size:19px">¿Qué tipo de despacho?</h1>
+      </div>
+    </header>
+    <main>
+      <button class="choice-card" data-tipo="cosecha">
+        <div class="choice-name">Despacho Cosecha</div>
+        <div class="choice-sub">Estacón, Astillable, Aserrío — venta o autoconsumo</div>
+      </button>
+      <button class="choice-card" data-tipo="aserrinco">
+        <div class="choice-name">Despacho Aserrinco</div>
+        <div class="choice-sub">Estacones, larguero, tabla, varillón, viruta</div>
+      </button>
+    </main>
+  `;
+}
+
+function renderDespachoForm(){
+  const tipo = state.despachoTipo;
+  const cfg = DESPACHO_TIPOS[tipo];
+  const d = state.despachoDraft;
+  const opt = (arr, val) => `<option value="">Seleccionar…</option>` + arr.map(v=>`<option value="${v}" ${v===String(val)?"selected":""}>${v}</option>`).join("");
+
+  const fieldHtml = (campo)=>{
+    const val = d[campo.name] ?? "";
+    if(campo.tipo === "select"){
+      return `
+      <div class="field" data-field="${campo.name}">
+        <label>${campo.label}${campo.req? ' <span class="req">*</span>':""}</label>
+        <select class="control" id="desp_${campo.name}">${opt(campo.opciones, val)}</select>
+        ${campo.req? `<div class="error">Selecciona ${campo.label.toLowerCase()}.</div>` : ""}
+      </div>`;
+    }
+    if(campo.tipo === "number"){
+      return `
+      <div class="field" data-field="${campo.name}">
+        <label>${campo.label}</label>
+        <input class="control" type="number" id="desp_${campo.name}" min="0" step="0.01" inputmode="decimal" placeholder="0" value="${val}">
+      </div>`;
+    }
+    return `
+      <div class="field" data-field="${campo.name}">
+        <label>${campo.label}</label>
+        <input class="control" type="text" id="desp_${campo.name}" value="${String(val).replace(/"/g,"&quot;")}" placeholder="Ej. ${campo.label}">
+      </div>`;
+  };
+
+  return `
+    <header class="topbar">
+      <button class="icon-btn" id="btnBack">${ICONS.back}</button>
+      <div>
+        <span class="eyebrow">${state.despachoEditing ? "Editar despacho" : "Nuevo despacho"}</span>
+        <h1 style="font-size:19px">${cfg.label}</h1>
+      </div>
+    </header>
+    <main>
+      <form id="despachoFormEl" novalidate>
+        <div class="field" data-field="fecha">
+          <label>Fecha y hora <span class="req">*</span></label>
+          <div class="row2">
+            <input class="control" id="desp_fecha" type="date" value="${d.fecha}">
+            <input class="control" id="desp_hora" type="time" value="${d.hora}">
+          </div>
+          <div class="error">Ingresa fecha y hora válidas.</div>
+        </div>
+
+        ${cfg.campos.map(fieldHtml).join("")}
+
+        <div class="form-actions">
+          <button type="submit" id="btnGuardarDespacho" class="btn btn-primary">${state.despachoEditing ? "Guardar cambios" : "Guardar despacho"}</button>
+        </div>
+      </form>
+    </main>
+  `;
+}
+
+function renderDespachoDetail(){
+  const d = state.despachos.find(x=>x.id===state.viewingDespachoId);
+  if(!d){ state.view="despachos"; return renderDespachos(); }
+  const cfg = DESPACHO_TIPOS[d.tipo];
+
+  const rows = [
+    ["Cliente", d.cliente],
+    ["Producto", d.producto],
+    ...(d.tipo==="cosecha"
+      ? [["Proceso", d.proceso]]
+      : [["Diámetro/Espesor", d.diametro], ["Largo", d.largo ? d.largo+" m" : ""]]),
+    ["Fecha", fmtFecha(d.fecha, d.hora)],
+    ["Remisión", d.remision],
+    ["Placa", d.placa],
+    [cfg.unidadLabel, d.tipo==="cosecha"
+      ? (d.toneladas ? fmtNum(d.toneladas)+" t" : "")
+      : (d.unidades ? fmtNum(d.unidades)+" u" : "")],
+  ];
+
+  return `
+    <header class="topbar">
+      <button class="icon-btn" id="btnBack">${ICONS.back}</button>
+      <div>
+        <span class="eyebrow">${cfg.label}</span>
+        <h1 style="font-size:19px">${d.cliente || "Despacho"}</h1>
+      </div>
+      <button class="icon-btn" id="btnEditDespacho" title="Editar">${ICONS.edit}</button>
+      <button class="icon-btn" id="btnDelDespacho" title="Eliminar" style="border-color:var(--danger); color:#ffd9d0">${ICONS.trash}</button>
+    </header>
+    <main>
+      <div class="detail-block">
+        <div class="detail-grid">
+          ${rows.map(([label,val])=>`<div><div class="d-label">${label}</div><div class="d-value">${val || "—"}</div></div>`).join("")}
+        </div>
+      </div>
+    </main>
+  `;
+}
+
+/* =========================================================
    MODAL: AGREGAR ITEM DE PRODUCTO
    ========================================================= */
 function openAddItemModal(productoId){
@@ -1049,6 +1311,10 @@ function render(){
   else if(state.view==="form2") app.innerHTML = renderForm2();
   else if(state.view==="detail") app.innerHTML = renderDetail();
   else if(state.view==="resumen") app.innerHTML = renderResumen();
+  else if(state.view==="despachos") app.innerHTML = renderDespachos();
+  else if(state.view==="despachoTipo") app.innerHTML = renderDespachoTipo();
+  else if(state.view==="despachoForm") app.innerHTML = renderDespachoForm();
+  else if(state.view==="despachoDetail") app.innerHTML = renderDespachoDetail();
 
   bind();
   window.scrollTo(0,0);
@@ -1065,6 +1331,10 @@ function bind(){
     document.getElementById("btnResumen").onclick = ()=>{
       state.resumenFecha = new Date().toISOString().slice(0,10);
       state.view = "resumen";
+      render();
+    };
+    document.getElementById("btnDespachos").onclick = ()=>{
+      state.view = "despachos";
       render();
     };
     document.getElementById("btnExport").onclick = exportCSV;
@@ -1094,6 +1364,134 @@ function bind(){
     document.querySelectorAll(".report-card").forEach(card=>{
       card.onclick = ()=>{ state.viewingId = card.dataset.id; state.view="detail"; render(); };
     });
+  }
+
+  if(state.view==="despachos"){
+    document.getElementById("btnBack").onclick = ()=>{ state.view="home"; render(); };
+    document.getElementById("btnNuevoDespacho").onclick = ()=>{
+      state.despachoTipo = null;
+      state.despachoEditing = false;
+      state.view = "despachoTipo";
+      render();
+    };
+    document.getElementById("btnExportDespachos").onclick = exportDespachosCSV;
+    const dsi = document.getElementById("despachoSearchInput");
+    if(dsi){
+      dsi.oninput = (e)=>{ state.despachoSearch = e.target.value; render(); document.getElementById("despachoSearchInput").focus(); document.getElementById("despachoSearchInput").setSelectionRange(state.despachoSearch.length,state.despachoSearch.length); };
+    }
+    document.querySelectorAll(".report-card").forEach(card=>{
+      card.onclick = ()=>{ state.viewingDespachoId = card.dataset.id; state.view="despachoDetail"; render(); };
+    });
+  }
+
+  if(state.view==="despachoTipo"){
+    document.getElementById("btnBack").onclick = ()=>{ state.view="despachos"; render(); };
+    document.querySelectorAll("[data-tipo]").forEach(btn=>{
+      btn.onclick = ()=>{
+        state.despachoTipo = btn.dataset.tipo;
+        state.despachoDraft = newDespachoDraft(btn.dataset.tipo);
+        state.despachoEditing = false;
+        state.view = "despachoForm";
+        render();
+      };
+    });
+  }
+
+  if(state.view==="despachoForm"){
+    document.getElementById("btnBack").onclick = ()=>{
+      state.view = state.despachoEditing ? "despachoDetail" : "despachos";
+      state.despachoDraft = null;
+      render();
+    };
+    const cfg = DESPACHO_TIPOS[state.despachoTipo];
+    const formEl = document.getElementById("despachoFormEl");
+    formEl.querySelectorAll(".control").forEach(el=>{
+      const clear = ()=>{
+        const wrap = el.closest(".field");
+        if(wrap){ wrap.classList.remove("has-error"); el.classList.remove("invalid"); }
+      };
+      el.addEventListener("input", clear);
+      el.addEventListener("change", clear);
+    });
+
+    const guardarDespacho = (e)=>{
+      if(e) e.preventDefault();
+      const vals = { fecha: document.getElementById("desp_fecha").value, hora: document.getElementById("desp_hora").value };
+      cfg.campos.forEach(c=> vals[c.name] = document.getElementById(`desp_${c.name}`).value.trim());
+
+      const checks = [{ field:"fecha", ok: !!vals.fecha && !!vals.hora }];
+      cfg.campos.filter(c=>c.req).forEach(c=> checks.push({ field:c.name, ok: !!vals[c.name] }));
+
+      let firstInvalid = null;
+      checks.forEach(c=>{
+        const wrap = formEl.querySelector(`[data-field="${c.field}"]`);
+        if(!wrap) return;
+        if(!c.ok){
+          wrap.classList.add("has-error");
+          wrap.querySelectorAll(".control").forEach(el=>el.classList.add("invalid"));
+          if(!firstInvalid) firstInvalid = wrap;
+        } else {
+          wrap.classList.remove("has-error");
+          wrap.querySelectorAll(".control").forEach(el=>el.classList.remove("invalid"));
+        }
+      });
+      if(firstInvalid){
+        firstInvalid.scrollIntoView({ behavior:"smooth", block:"center" });
+        const el = firstInvalid.querySelector(".control");
+        if(el) el.focus({ preventScroll:true });
+        toast("Completa los campos obligatorios");
+        return;
+      }
+
+      const wasEditing = state.despachoEditing;
+      const despachoToSave = { ...state.despachoDraft, ...vals };
+      if(wasEditing) despachoToSave.actualizado = new Date().toISOString();
+
+      setDoc(doc(despachosCol, despachoToSave.id), despachoToSave).catch(err=>{
+        console.error(err);
+        toast("No se pudo guardar. Intenta de nuevo.");
+      });
+      const idx = state.despachos.findIndex(x=>x.id===despachoToSave.id);
+      if(idx>=0) state.despachos[idx] = despachoToSave;
+      else state.despachos.unshift(despachoToSave);
+
+      state.viewingDespachoId = despachoToSave.id;
+      state.despachoDraft = null;
+      state.despachoEditing = false;
+      state.view = "despachoDetail";
+      render();
+      toast(navigator.onLine ? (wasEditing ? "Cambios guardados" : "Despacho guardado") : "Guardado — se subirá cuando vuelva la señal");
+    };
+    formEl.addEventListener("submit", guardarDespacho);
+    const btnGuardarDespacho = document.getElementById("btnGuardarDespacho");
+    if(btnGuardarDespacho) btnGuardarDespacho.addEventListener("click", (e)=>{ guardarDespacho(e); });
+  }
+
+  if(state.view==="despachoDetail"){
+    document.getElementById("btnBack").onclick = ()=>{ state.view="despachos"; state.viewingDespachoId=null; render(); };
+    document.getElementById("btnEditDespacho").onclick = ()=>{
+      const d = state.despachos.find(x=>x.id===state.viewingDespachoId);
+      if(!d) return;
+      state.despachoTipo = d.tipo;
+      state.despachoDraft = { ...d };
+      state.despachoEditing = true;
+      state.view = "despachoForm";
+      render();
+    };
+    document.getElementById("btnDelDespacho").onclick = ()=>{
+      if(confirm("¿Eliminar este despacho? Esta acción no se puede deshacer.")){
+        const idToDelete = state.viewingDespachoId;
+        deleteDoc(doc(despachosCol, idToDelete)).catch(err=>{
+          console.error(err);
+          toast("No se pudo eliminar. Intenta de nuevo.");
+        });
+        state.despachos = state.despachos.filter(x=>x.id!==idToDelete);
+        state.view = "despachos";
+        state.viewingDespachoId = null;
+        render();
+        toast("Despacho eliminado");
+      }
+    };
   }
 
   if(state.view==="form1"){
@@ -1234,6 +1632,23 @@ function bind(){
 /* =========================================================
    EXPORTAR A CSV (abre en Excel)
    ========================================================= */
+function downloadCSV(rows, filename){
+  const csv = rows.map(row=> row.map(v=>{
+    const s = String(v ?? "");
+    return /[",;\n]/.test(s) ? `"${s.replace(/"/g,'""')}"` : s;
+  }).join(";")).join("\n");
+  const blob = new Blob(["\uFEFF"+csv], {type:"text/csv;charset=utf-8;"});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  toast("Exportado a CSV/Excel");
+}
+
 function exportCSV(){
   if(state.reports.length===0){ toast("No hay registros para exportar"); return; }
   const headers = ["Supervisor","Fecha","Hora","Finca","Equipo","Producto","Medida","Unidades","Toneladas"];
@@ -1247,21 +1662,22 @@ function exportCSV(){
       });
     }
   });
-  const csv = rows.map(row=> row.map(v=>{
-    const s = String(v ?? "");
-    return /[",;\n]/.test(s) ? `"${s.replace(/"/g,'""')}"` : s;
-  }).join(";")).join("\n");
-  const blob = new Blob(["\uFEFF"+csv], {type:"text/csv;charset=utf-8;"});
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `cosechas_export_${new Date().toISOString().slice(0,10)}.csv`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-  toast("Exportado a CSV/Excel");
+  downloadCSV(rows, `cosechas_export_${new Date().toISOString().slice(0,10)}.csv`);
 }
+
+function exportDespachosCSV(){
+  if(state.despachos.length===0){ toast("No hay despachos para exportar"); return; }
+  const headers = ["Tipo","Cliente","Producto","Proceso","Diámetro/Espesor","Largo","Fecha","Hora","Remisión","Placa","Toneladas","Unidades"];
+  const rows = [headers];
+  state.despachos.forEach(d=>{
+    rows.push([
+      DESPACHO_TIPOS[d.tipo].label, d.cliente, d.producto, d.proceso||"", d.diametro||"", d.largo||"",
+      d.fecha, d.hora, d.remision||"", d.placa||"", d.toneladas||"", d.unidades||"",
+    ]);
+  });
+  downloadCSV(rows, `despachos_export_${new Date().toISOString().slice(0,10)}.csv`);
+}
+
 
 /* =========================================================
    MANEJO DE ERRORES VISIBLE
