@@ -1,4 +1,4 @@
-const CACHE_NAME = "cosechas-cas-v5";
+const CACHE_NAME = "cosechas-cas-v6";
 
 // Estos archivos SIEMPRE se intenta traer de internet primero (para que
 // las actualizaciones se vean de inmediato); si no hay señal, se usa la
@@ -22,8 +22,6 @@ const CACHE_FIRST = [
 self.addEventListener("install", (event) => {
   event.waitUntil((async () => {
     const cache = await caches.open(CACHE_NAME);
-    // Se cachea cada archivo por separado: si uno falla (sin señal en ese
-    // instante) no impide que el resto quede instalado.
     await Promise.all(
       [...NETWORK_FIRST, ...CACHE_FIRST].map(async (url) => {
         try {
@@ -57,26 +55,36 @@ self.addEventListener("fetch", (event) => {
   if (req.method !== "GET") return;
 
   const isOwnFile = req.url.startsWith(self.location.origin);
+
+  // CLAVE: cualquier navegación (abrir/recargar la app, venga la URL con o
+  // sin "index.html" al final, sea la raíz del sitio o el ícono instalado)
+  // siempre va primero a la red, ignorando toda caché. Antes solo mirábamos
+  // si la URL terminaba en "index.html" literalmente, y por eso a veces no
+  // detectaba que había que buscar la versión nueva.
+  const isNavigation = req.mode === "navigate";
+  const isManifest = isOwnFile && req.url.endsWith("manifest.json");
+  const isNetworkFirst = isNavigation || isManifest;
   const isCacheFirst = CACHE_FIRST.includes(req.url);
-  const isNetworkFirst = NETWORK_FIRST.some((p) => req.url.endsWith(p.replace("./", "")));
+
   if (!isOwnFile && !isCacheFirst) return; // deja pasar (Firestore, analytics, etc.)
 
   if (isNetworkFirst) {
-    // Red primero, ignorando la caché HTTP del navegador: si hay señal,
-    // siempre trae la versión más nueva de verdad (no una copia "casi nueva").
     event.respondWith(
       fetch(req, { cache: "no-store" })
         .then((response) => {
           const copy = response.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(req, copy));
+          const cacheKey = isNavigation ? "./index.html" : "./manifest.json";
+          caches.open(CACHE_NAME).then((cache) => cache.put(cacheKey, copy));
           return response;
         })
-        .catch(() => caches.match(req).then((c) => c || caches.match("./index.html")))
+        .catch(() => caches.match(isNavigation ? "./index.html" : "./manifest.json"))
     );
     return;
   }
 
-  // Caché primero (íconos, SDK de Firebase): más rápido, casi no cambian.
+  if (!isCacheFirst) return; // cualquier otro archivo propio: directo a la red
+
+  // Caché primero (íconos, SDK de Firebase, Chart.js): más rápido, casi no cambian.
   event.respondWith(
     caches.match(req).then((cached) => {
       if (cached) return cached;
