@@ -4,6 +4,9 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Cosechas · CAS</title>
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
 <link rel="manifest" href="./manifest.json">
 <meta name="theme-color" content="#2F4A33">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -1877,6 +1880,16 @@ window.addEventListener("error", (ev)=>{
 if ("serviceWorker" in navigator && (location.protocol === "https:" || location.hostname === "localhost")) {
   window.addEventListener("load", () => {
     navigator.serviceWorker.register("./sw.js").catch(()=>{});
+  });
+
+  // Cuando hay una versión nueva, el navegador la instala en segundo plano.
+  // Apenas esa versión nueva "toma control" de la página, recargamos solos
+  // para mostrarla — así nadie tiene que desinstalar/reinstalar la app.
+  let swRefreshing = false;
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (swRefreshing) return;
+    swRefreshing = true;
+    window.location.reload();
   });
 }
 
