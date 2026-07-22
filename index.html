@@ -596,6 +596,9 @@ let state = {
   despachoEditing: false,
   viewingDespachoId: null,
   despachoSearch: "",
+  despachoResumenFecha: new Date().toISOString().slice(0,10),
+  despachoResumenChartType: "bar",
+  despachoResumenChartGroup: "cliente",
 };
 
 onSnapshot(
@@ -614,7 +617,7 @@ onSnapshot(
   query(despachosCol, orderBy("creado","desc")),
   (snapshot)=>{
     state.despachos = snapshot.docs.map(d=>d.data());
-    if(["despachos","despachoDetail"].includes(state.view)) render();
+    if(["despachos","despachoDetail","despachoResumen"].includes(state.view)) render();
   },
   (err)=>{
     console.error(err);
@@ -1093,6 +1096,129 @@ function exportResumenChartImage(){
   toast("Imagen descargada");
 }
 
+/* =========================================================
+   GRÁFICOS DE DESPACHOS (independientes de los de Cosecha,
+   para que nunca se mezclen los datos de ambas secciones)
+   ========================================================= */
+// Número de despachos de un día, agrupados por cliente, producto o tipo
+function getDespachoGroupData(fecha, groupKey){
+  const despachos = state.despachos.filter(d=>d.fecha===fecha);
+  const keyFn = groupKey==="tipo"
+    ? (d)=> DESPACHO_TIPOS[d.tipo].label
+    : (d)=> d[groupKey];
+  const map = new Map();
+  despachos.forEach(d=>{
+    const k = keyFn(d) || "—";
+    map.set(k, (map.get(k)||0) + 1);
+  });
+  return [...map.entries()].sort((a,b)=>b[1]-a[1]).map(([label,value])=>({label, value}));
+}
+
+// Número de despachos por día, de los últimos `days` días hasta `fecha`
+function getDespachoTrendData(fecha, days=7){
+  const end = new Date(fecha+"T00:00:00");
+  const out = [];
+  for(let i=days-1;i>=0;i--){
+    const dt = new Date(end);
+    dt.setDate(dt.getDate()-i);
+    const key = dt.toISOString().slice(0,10);
+    const count = state.despachos.filter(d=>d.fecha===key).length;
+    out.push({ label: dt.toLocaleDateString("es-CO",{day:"2-digit", month:"2-digit"}), value: count });
+  }
+  return out;
+}
+
+let despachoChartInstance = null;
+function drawDespachoResumenChart(){
+  const canvas = document.getElementById("despachoResumenChart");
+  if(!canvas || typeof Chart === "undefined") return;
+  if(despachoChartInstance){ despachoChartInstance.destroy(); despachoChartInstance = null; }
+
+  const type = state.despachoResumenChartType; // bar | pie | line
+  let labels, data;
+
+  if(type === "line"){
+    const trend = getDespachoTrendData(state.despachoResumenFecha, 7);
+    labels = trend.map(t=>t.label);
+    data = trend.map(t=>t.value);
+  } else {
+    const grouped = getDespachoGroupData(state.despachoResumenFecha, state.despachoResumenChartGroup);
+    labels = grouped.map(g=>g.label);
+    data = grouped.map(g=>g.value);
+  }
+
+  const palette = [cssVar("--accent"), cssVar("--primary"), "#4F7A52", "#6E5643", "#8A5613", "#2C4A2E", "#B08968"];
+  const chartType = type === "pie" ? "doughnut" : type;
+  const inkSoft = cssVar("--ink-soft");
+  const line = cssVar("--line");
+  const ink = cssVar("--ink");
+  const accent = cssVar("--accent");
+
+  despachoChartInstance = new Chart(canvas.getContext("2d"), {
+    type: chartType,
+    data: {
+      labels,
+      datasets: [{
+        label: "Despachos",
+        data,
+        backgroundColor: chartType==="line" ? "rgba(181,116,26,.15)" : labels.map((_,i)=>palette[i % palette.length]),
+        borderColor: chartType==="line" ? accent : "#fff",
+        borderWidth: 2,
+        borderRadius: chartType==="bar" ? 6 : 0,
+        tension: 0.35,
+        fill: chartType==="line",
+        pointRadius: chartType==="line" ? 3 : 0,
+        pointBackgroundColor: accent,
+      }]
+    },
+    options: {
+      responsive:true,
+      maintainAspectRatio:false,
+      plugins: {
+        legend: { display: chartType==="doughnut", position:"bottom", labels:{ font:{family:"'Public Sans'", size:11}, color: ink, boxWidth:12, padding:14 } },
+        tooltip: { callbacks: { label: (ctx)=> ` ${ctx.label}: ${fmtNum(ctx.parsed.y ?? ctx.parsed)} despacho${(ctx.parsed.y ?? ctx.parsed)===1?"":"s"}` } },
+      },
+      scales: chartType==="doughnut" ? {} : {
+        y: { beginAtZero:true, ticks:{ stepSize:1, color: inkSoft, font:{family:"'JetBrains Mono'", size:10} }, grid:{ color: line } },
+        x: { ticks:{ color: inkSoft, font:{family:"'Public Sans'", size:10} }, grid:{ display:false } },
+      }
+    }
+  });
+}
+
+function exportDespachoChartCSV(){
+  const type = state.despachoResumenChartType;
+  let headers, rows, filename;
+
+  if(type === "line"){
+    const trend = getDespachoTrendData(state.despachoResumenFecha, 7);
+    headers = ["Fecha","Despachos"];
+    rows = [headers, ...trend.map(t=>[t.label, t.value])];
+    filename = `despachos_tendencia_${state.despachoResumenFecha}.csv`;
+  } else {
+    const groupLabel = state.despachoResumenChartGroup==="cliente" ? "Cliente" : state.despachoResumenChartGroup==="producto" ? "Producto" : "Tipo";
+    const grouped = getDespachoGroupData(state.despachoResumenFecha, state.despachoResumenChartGroup);
+    headers = [groupLabel, "Despachos"];
+    rows = [headers, ...grouped.map(g=>[g.label, g.value])];
+    filename = `despachos_${state.despachoResumenChartGroup}_${state.despachoResumenFecha}.csv`;
+  }
+
+  if(rows.length<=1){ toast("No hay datos para exportar"); return; }
+  downloadCSV(rows, filename);
+}
+
+function exportDespachoChartImage(){
+  if(!despachoChartInstance){ toast("No hay gráfico para exportar"); return; }
+  const url = despachoChartInstance.toBase64Image("image/png", 1);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `grafico_despachos_${state.despachoResumenChartType}_${state.despachoResumenFecha}.png`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  toast("Imagen descargada");
+}
+
 function renderResumen(){
   const fecha = state.resumenFecha;
   const reports = state.reports.filter(r=>r.fecha===fecha);
@@ -1256,6 +1382,7 @@ function renderDespachos(){
     <header class="topbar">
       <button class="icon-btn" id="btnBack">${ICONS.back}</button>
       <h1>Despachos</h1>
+      <button class="icon-btn" id="btnDespachoResumen" title="Resumen y gráficos">${ICONS.chart}</button>
       <button class="icon-btn" id="btnExportDespachos" title="Exportar a Excel">${ICONS.download}</button>
     </header>
     <main>
@@ -1289,6 +1416,80 @@ function renderDespachos(){
           </div>
         </div>`;
       }).join("")}
+    </main>
+  `;
+}
+
+function renderDespachoResumen(){
+  const fecha = state.despachoResumenFecha;
+  const despachos = state.despachos.filter(d=>d.fecha===fecha);
+  const totCosecha = despachos.filter(d=>d.tipo==="cosecha").reduce((a,d)=>a+(Number(d.toneladas)||0),0);
+  const totAserrinco = despachos.filter(d=>d.tipo==="aserrinco").reduce((a,d)=>a+(Number(d.unidades)||0),0);
+  const clientes = new Set(despachos.map(d=>d.cliente)).size;
+
+  return `
+    <header class="topbar">
+      <button class="icon-btn" id="btnBack">${ICONS.back}</button>
+      <div>
+        <span class="eyebrow">Solo despachos</span>
+        <h1 style="font-size:19px">Resumen de despachos</h1>
+      </div>
+      <div class="icon-btn" style="visibility:hidden">${ICONS.back}</div>
+    </header>
+    <main>
+      <div class="field" style="margin-top:4px;">
+        <label>Fecha</label>
+        <input class="control" type="date" id="despachoResumenFechaInput" value="${fecha}">
+      </div>
+
+      <div class="stat-row">
+        <div class="stat-card"><div class="n">${despachos.length}</div><div class="l">Despachos · ${clientes} cliente${clientes!==1?"s":""}</div></div>
+        <div class="stat-card"><div class="n">${fmtNum(totCosecha)} t</div><div class="l">Cosecha · ${fmtNum(totAserrinco)} u Aserrinco</div></div>
+      </div>
+
+      <div class="section-title"><h3>Gráficos</h3></div>
+      <div class="detail-block">
+        <div class="chart-tabs">
+          <button class="chart-tab ${state.despachoResumenChartType==="bar"?"active":""}" data-despchart="bar">${ICONS.chart} Barras</button>
+          <button class="chart-tab ${state.despachoResumenChartType==="pie"?"active":""}" data-despchart="pie">${ICONS.pie} Torta</button>
+          <button class="chart-tab ${state.despachoResumenChartType==="line"?"active":""}" data-despchart="line">${ICONS.trend} Tendencia</button>
+        </div>
+        ${state.despachoResumenChartType!=="line" ? `
+        <div class="field" style="margin:14px 0 0;">
+          <label>Agrupar por</label>
+          <select class="control" id="despachoGroupSelect">
+            <option value="cliente" ${state.despachoResumenChartGroup==="cliente"?"selected":""}>Cliente</option>
+            <option value="producto" ${state.despachoResumenChartGroup==="producto"?"selected":""}>Producto</option>
+            <option value="tipo" ${state.despachoResumenChartGroup==="tipo"?"selected":""}>Tipo de despacho</option>
+          </select>
+        </div>` : `
+        <p style="font-size:12px; color:var(--ink-soft); margin:14px 0 0;">Cantidad de despachos por día, últimos 7 días.</p>`}
+        <div style="height:220px; margin-top:16px;">
+          <canvas id="despachoResumenChart"></canvas>
+        </div>
+        <div class="quick-row" style="margin-top:14px;">
+          <button class="btn btn-ghost btn-sm" id="btnExportDespachoChartData">${ICONS.download} Datos a Excel</button>
+          <button class="btn btn-ghost btn-sm" id="btnExportDespachoChartImage">${ICONS.image} Imagen</button>
+        </div>
+      </div>
+
+      ${despachos.length===0 ? `
+        <div class="empty-state">No hay despachos registrados este día.</div>
+      ` : `
+        <div class="section-title"><h3>Despachos del día</h3></div>
+        ${despachos.sort((a,b)=>b.creado.localeCompare(a.creado)).map(d=>{
+          const cfg = DESPACHO_TIPOS[d.tipo];
+          const cantidad = d.tipo==="cosecha" ? `${fmtNum(d.toneladas)} t` : `${fmtNum(d.unidades)} u`;
+          return `
+          <div class="report-card" data-id="${d.id}">
+            <div class="row1">
+              <div class="predio">${d.cliente || "(sin cliente)"}</div>
+              <div class="fecha">${d.hora||""}</div>
+            </div>
+            <div class="meta">${d.producto || "—"} · ${cfg.label} · ${cantidad}</div>
+          </div>`;
+        }).join("")}
+      `}
     </main>
   `;
 }
@@ -1480,6 +1681,10 @@ function render(){
     resumenChartInstance.destroy();
     resumenChartInstance = null;
   }
+  if(state.view!=="despachoResumen" && despachoChartInstance){
+    despachoChartInstance.destroy();
+    despachoChartInstance = null;
+  }
   const app = document.getElementById("app");
   if(state.view==="home") app.innerHTML = renderHome();
   else if(state.view==="form1") app.innerHTML = renderForm1();
@@ -1487,6 +1692,7 @@ function render(){
   else if(state.view==="detail") app.innerHTML = renderDetail();
   else if(state.view==="resumen") app.innerHTML = renderResumen();
   else if(state.view==="despachos") app.innerHTML = renderDespachos();
+  else if(state.view==="despachoResumen") app.innerHTML = renderDespachoResumen();
   else if(state.view==="despachoTipo") app.innerHTML = renderDespachoTipo();
   else if(state.view==="despachoForm") app.innerHTML = renderDespachoForm();
   else if(state.view==="despachoDetail") app.innerHTML = renderDespachoDetail();
@@ -1560,6 +1766,11 @@ function bind(){
       render();
     };
     document.getElementById("btnExportDespachos").onclick = exportDespachosCSV;
+    document.getElementById("btnDespachoResumen").onclick = ()=>{
+      state.despachoResumenFecha = new Date().toISOString().slice(0,10);
+      state.view = "despachoResumen";
+      render();
+    };
     const dsi = document.getElementById("despachoSearchInput");
     if(dsi){
       dsi.oninput = (e)=>{ state.despachoSearch = e.target.value; render(); document.getElementById("despachoSearchInput").focus(); document.getElementById("despachoSearchInput").setSelectionRange(state.despachoSearch.length,state.despachoSearch.length); };
@@ -1567,6 +1778,27 @@ function bind(){
     document.querySelectorAll(".report-card").forEach(card=>{
       card.onclick = ()=>{ state.viewingDespachoId = card.dataset.id; state.view="despachoDetail"; render(); };
     });
+  }
+
+  if(state.view==="despachoResumen"){
+    document.getElementById("btnBack").onclick = ()=>{ state.view="despachos"; render(); };
+    document.getElementById("despachoResumenFechaInput").onchange = (e)=>{
+      state.despachoResumenFecha = e.target.value;
+      render();
+    };
+    document.querySelectorAll("[data-despchart]").forEach(btn=>{
+      btn.onclick = ()=>{ state.despachoResumenChartType = btn.dataset.despchart; render(); };
+    });
+    const despGroupSelect = document.getElementById("despachoGroupSelect");
+    if(despGroupSelect){
+      despGroupSelect.onchange = (e)=>{ state.despachoResumenChartGroup = e.target.value; render(); };
+    }
+    document.getElementById("btnExportDespachoChartData").onclick = exportDespachoChartCSV;
+    document.getElementById("btnExportDespachoChartImage").onclick = exportDespachoChartImage;
+    document.querySelectorAll(".report-card").forEach(card=>{
+      card.onclick = ()=>{ state.viewingDespachoId = card.dataset.id; state.view="despachoDetail"; render(); };
+    });
+    drawDespachoResumenChart();
   }
 
   if(state.view==="despachoTipo"){
