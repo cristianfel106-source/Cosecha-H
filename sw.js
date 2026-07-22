@@ -1,4 +1,4 @@
-const CACHE_NAME = "cosechas-cas-v4";
+const CACHE_NAME = "cosechas-cas-v5";
 
 // Estos archivos SIEMPRE se intenta traer de internet primero (para que
 // las actualizaciones se vean de inmediato); si no hay señal, se usa la
@@ -27,7 +27,10 @@ self.addEventListener("install", (event) => {
     await Promise.all(
       [...NETWORK_FIRST, ...CACHE_FIRST].map(async (url) => {
         try {
-          const res = await fetch(url, { mode: url.startsWith("http") ? "cors" : "same-origin" });
+          const res = await fetch(url, {
+            mode: url.startsWith("http") ? "cors" : "same-origin",
+            cache: "reload", // ignora la caché HTTP del navegador, siempre trae lo último
+          });
           if (res.ok) await cache.put(url, res);
         } catch (e) { /* se descargará en el siguiente intento con señal */ }
       })
@@ -59,9 +62,10 @@ self.addEventListener("fetch", (event) => {
   if (!isOwnFile && !isCacheFirst) return; // deja pasar (Firestore, analytics, etc.)
 
   if (isNetworkFirst) {
-    // Red primero: si hay señal, siempre trae la versión más nueva.
+    // Red primero, ignorando la caché HTTP del navegador: si hay señal,
+    // siempre trae la versión más nueva de verdad (no una copia "casi nueva").
     event.respondWith(
-      fetch(req)
+      fetch(req, { cache: "no-store" })
         .then((response) => {
           const copy = response.clone();
           caches.open(CACHE_NAME).then((cache) => cache.put(req, copy));
