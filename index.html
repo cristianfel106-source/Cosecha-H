@@ -587,6 +587,10 @@ let state = {
   viewingId: null,
   editing: false,          // true cuando el formulario está editando un registro existente
   resumenFecha: new Date().toISOString().slice(0,10),
+  resumenModo: "dia",          // dia | semana | mes | rango
+  resumenMes: new Date().toISOString().slice(0,7),
+  resumenRangoInicio: new Date().toISOString().slice(0,10),
+  resumenRangoFin: new Date().toISOString().slice(0,10),
   resumenExpanded: new Set(),
   resumenChartType: "bar",     // bar | pie | line
   resumenChartGroup: "producto", // producto | finca | supervisor
@@ -597,6 +601,10 @@ let state = {
   viewingDespachoId: null,
   despachoSearch: "",
   despachoResumenFecha: new Date().toISOString().slice(0,10),
+  despachoResumenModo: "dia",
+  despachoResumenMes: new Date().toISOString().slice(0,7),
+  despachoResumenRangoInicio: new Date().toISOString().slice(0,10),
+  despachoResumenRangoFin: new Date().toISOString().slice(0,10),
   despachoResumenChartType: "bar",
   despachoResumenChartGroup: "cliente",
 };
@@ -972,34 +980,121 @@ function groupBy(items, keyFn){
 
 function cssVar(name){ return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
 
-// Toneladas de un día, agrupadas por producto, finca o supervisor
-function getResumenGroupData(fecha, groupKey){
-  const reports = state.reports.filter(r=>r.fecha===fecha);
-  const itemsDelDia = [];
-  reports.forEach(r=> r.items.forEach(it=> itemsDelDia.push({...it, finca:r.finca, supervisor:r.supervisor})));
+/* =========================================================
+   RANGOS DE FECHA — compartido entre el resumen de Cosecha y
+   el de Despachos, para que ambos manejen "Día/Semana/Mes/Rango"
+   de la misma forma.
+   ========================================================= */
+const MESES_ES = ["enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"];
+
+function computeDateRange(modo, fecha, mes, rangoInicio, rangoFin){
+  if(modo==="semana"){
+    const d = new Date(fecha+"T00:00:00");
+    const dow = d.getDay(); // 0=domingo … 6=sábado
+    const diffToMonday = dow===0 ? -6 : 1-dow;
+    const monday = new Date(d); monday.setDate(d.getDate()+diffToMonday);
+    const sunday = new Date(monday); sunday.setDate(monday.getDate()+6);
+    return [monday.toISOString().slice(0,10), sunday.toISOString().slice(0,10)];
+  }
+  if(modo==="mes"){
+    const [y,m] = mes.split("-").map(Number);
+    const first = new Date(y, m-1, 1);
+    const last = new Date(y, m, 0);
+    return [first.toISOString().slice(0,10), last.toISOString().slice(0,10)];
+  }
+  if(modo==="rango"){
+    return rangoInicio <= rangoFin ? [rangoInicio, rangoFin] : [rangoFin, rangoInicio];
+  }
+  return [fecha, fecha]; // "dia"
+}
+
+function formatRangeLabel(modo, desde, hasta, mes){
+  if(modo==="dia") return fmtFecha(desde, "");
+  if(modo==="mes"){
+    const [y,m] = mes.split("-").map(Number);
+    return `${MESES_ES[m-1]} de ${y}`;
+  }
+  const fmt = (s)=>{ const [y,m,d]=s.split("-"); return `${d}/${m}/${y}`; };
+  return `${fmt(desde)} — ${fmt(hasta)}`;
+}
+
+// Un punto por día dentro de [desde,hasta]; usado por la gráfica de tendencia
+// cuando el periodo es semana/mes/rango (para "día" se usan los últimos 7 días).
+function eachDayInRange(desde, hasta){
+  const out = [];
+  let cur = new Date(desde+"T00:00:00");
+  const end = new Date(hasta+"T00:00:00");
+  while(cur <= end){
+    out.push(cur.toISOString().slice(0,10));
+    cur.setDate(cur.getDate()+1);
+  }
+  return out;
+}
+
+// Selector de periodo reutilizado por el resumen de Cosecha y el de Despachos.
+// `prefix` define los ids de los campos (ej. "resumen" o "despachoResumen").
+function renderPeriodPicker(prefix, modo, fecha, mes, rangoInicio, rangoFin){
+  return `
+    <div class="field" style="margin-top:4px;">
+      <label>Periodo</label>
+      <div class="chart-tabs">
+        <button class="chart-tab ${modo==="dia"?"active":""}" data-periodo="dia">Día</button>
+        <button class="chart-tab ${modo==="semana"?"active":""}" data-periodo="semana">Semana</button>
+        <button class="chart-tab ${modo==="mes"?"active":""}" data-periodo="mes">Mes</button>
+        <button class="chart-tab ${modo==="rango"?"active":""}" data-periodo="rango">Rango</button>
+      </div>
+    </div>
+    ${(modo==="dia"||modo==="semana") ? `
+    <div class="field">
+      <input class="control" type="date" id="${prefix}FechaInput" value="${fecha}">
+      ${modo==="semana" ? `<div class="hint">Semana completa (lunes a domingo) que incluye este día.</div>` : ""}
+    </div>` : ""}
+    ${modo==="mes" ? `
+    <div class="field">
+      <input class="control" type="month" id="${prefix}MesInput" value="${mes}">
+    </div>` : ""}
+    ${modo==="rango" ? `
+    <div class="field">
+      <div class="row2">
+        <input class="control" type="date" id="${prefix}RangoInicioInput" value="${rangoInicio}">
+        <input class="control" type="date" id="${prefix}RangoFinInput" value="${rangoFin}">
+      </div>
+    </div>` : ""}
+  `;
+}
+
+// Toneladas dentro de un rango [desde,hasta], agrupadas por producto, finca o supervisor
+function getResumenGroupData(desde, hasta, groupKey){
+  const reports = state.reports.filter(r=>r.fecha>=desde && r.fecha<=hasta);
+  const itemsRango = [];
+  reports.forEach(r=> r.items.forEach(it=> itemsRango.push({...it, finca:r.finca, supervisor:r.supervisor})));
 
   if(groupKey==="producto"){
     return PRODUCTOS.map(p=>({
       label: p.nombre,
-      value: itemsDelDia.filter(it=>it.productoId===p.id).reduce((a,it)=>a+(Number(it.toneladas)||0),0),
+      value: itemsRango.filter(it=>it.productoId===p.id).reduce((a,it)=>a+(Number(it.toneladas)||0),0),
     }));
   }
-  const g = groupBy(itemsDelDia, it=> groupKey==="finca" ? it.finca : it.supervisor);
+  const g = groupBy(itemsRango, it=> groupKey==="finca" ? it.finca : it.supervisor);
   return g.map(([label,gr])=>({ label, value: gr.toneladas }));
 }
 
-// Toneladas totales por día, de los últimos `days` días hasta `fecha` (para la tendencia)
-function getResumenTrendData(fecha, days=7){
-  const end = new Date(fecha+"T00:00:00");
-  const out = [];
-  for(let i=days-1;i>=0;i--){
-    const dt = new Date(end);
-    dt.setDate(dt.getDate()-i);
-    const key = dt.toISOString().slice(0,10);
-    const tot = totalesGlobales(state.reports.filter(r=>r.fecha===key));
-    out.push({ label: dt.toLocaleDateString("es-CO",{day:"2-digit", month:"2-digit"}), value: tot.toneladas });
+// Toneladas totales por día. En modo "día" muestra los últimos 7 días para
+// dar contexto; en semana/mes/rango muestra cada día del periodo elegido.
+function getResumenTrendData(modo, fecha, desde, hasta){
+  let dias;
+  if(modo==="dia"){
+    const end = new Date(fecha+"T00:00:00");
+    dias = [];
+    for(let i=6;i>=0;i--){ const dt=new Date(end); dt.setDate(dt.getDate()-i); dias.push(dt.toISOString().slice(0,10)); }
+  } else {
+    dias = eachDayInRange(desde, hasta);
   }
-  return out;
+  return dias.map(key=>{
+    const tot = totalesGlobales(state.reports.filter(r=>r.fecha===key));
+    const [y,m,d] = key.split("-");
+    return { label: `${d}/${m}`, value: tot.toneladas };
+  });
 }
 
 let resumenChartInstance = null;
@@ -1008,15 +1103,16 @@ function drawResumenChart(){
   if(!canvas || typeof Chart === "undefined") return;
   if(resumenChartInstance){ resumenChartInstance.destroy(); resumenChartInstance = null; }
 
+  const [desde,hasta] = computeDateRange(state.resumenModo, state.resumenFecha, state.resumenMes, state.resumenRangoInicio, state.resumenRangoFin);
   const type = state.resumenChartType; // bar | pie | line
   let labels, data;
 
   if(type === "line"){
-    const trend = getResumenTrendData(state.resumenFecha, 7);
+    const trend = getResumenTrendData(state.resumenModo, state.resumenFecha, desde, hasta);
     labels = trend.map(t=>t.label);
     data = trend.map(t=>t.value);
   } else {
-    const grouped = getResumenGroupData(state.resumenFecha, state.resumenChartGroup);
+    const grouped = getResumenGroupData(desde, hasta, state.resumenChartGroup);
     labels = grouped.map(g=>g.label);
     data = grouped.map(g=>g.value);
   }
@@ -1064,20 +1160,21 @@ function drawResumenChart(){
 }
 
 function exportResumenChartCSV(){
+  const [desde,hasta] = computeDateRange(state.resumenModo, state.resumenFecha, state.resumenMes, state.resumenRangoInicio, state.resumenRangoFin);
   const type = state.resumenChartType;
   let headers, rows, filename;
 
   if(type === "line"){
-    const trend = getResumenTrendData(state.resumenFecha, 7);
+    const trend = getResumenTrendData(state.resumenModo, state.resumenFecha, desde, hasta);
     headers = ["Fecha","Toneladas"];
     rows = [headers, ...trend.map(t=>[t.label, t.value])];
-    filename = `grafico_tendencia_${state.resumenFecha}.csv`;
+    filename = `grafico_tendencia_${desde}_a_${hasta}.csv`;
   } else {
     const groupLabel = state.resumenChartGroup==="producto" ? "Producto" : state.resumenChartGroup==="finca" ? "Finca" : "Supervisor";
-    const grouped = getResumenGroupData(state.resumenFecha, state.resumenChartGroup);
+    const grouped = getResumenGroupData(desde, hasta, state.resumenChartGroup);
     headers = [groupLabel, "Toneladas"];
     rows = [headers, ...grouped.map(g=>[g.label, g.value])];
-    filename = `grafico_${state.resumenChartGroup}_${state.resumenFecha}.csv`;
+    filename = `grafico_${state.resumenChartGroup}_${desde}_a_${hasta}.csv`;
   }
 
   if(rows.length<=1){ toast("No hay datos para exportar"); return; }
@@ -1086,10 +1183,11 @@ function exportResumenChartCSV(){
 
 function exportResumenChartImage(){
   if(!resumenChartInstance){ toast("No hay gráfico para exportar"); return; }
+  const [desde,hasta] = computeDateRange(state.resumenModo, state.resumenFecha, state.resumenMes, state.resumenRangoInicio, state.resumenRangoFin);
   const url = resumenChartInstance.toBase64Image("image/png", 1);
   const a = document.createElement("a");
   a.href = url;
-  a.download = `grafico_${state.resumenChartType}_${state.resumenFecha}.png`;
+  a.download = `grafico_${state.resumenChartType}_${desde}_a_${hasta}.png`;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
@@ -1100,9 +1198,9 @@ function exportResumenChartImage(){
    GRÁFICOS DE DESPACHOS (independientes de los de Cosecha,
    para que nunca se mezclen los datos de ambas secciones)
    ========================================================= */
-// Número de despachos de un día, agrupados por cliente, producto o tipo
-function getDespachoGroupData(fecha, groupKey){
-  const despachos = state.despachos.filter(d=>d.fecha===fecha);
+// Número de despachos dentro de un rango, agrupados por cliente, producto o tipo
+function getDespachoGroupData(desde, hasta, groupKey){
+  const despachos = state.despachos.filter(d=>d.fecha>=desde && d.fecha<=hasta);
   const keyFn = groupKey==="tipo"
     ? (d)=> DESPACHO_TIPOS[d.tipo].label
     : (d)=> d[groupKey];
@@ -1114,18 +1212,22 @@ function getDespachoGroupData(fecha, groupKey){
   return [...map.entries()].sort((a,b)=>b[1]-a[1]).map(([label,value])=>({label, value}));
 }
 
-// Número de despachos por día, de los últimos `days` días hasta `fecha`
-function getDespachoTrendData(fecha, days=7){
-  const end = new Date(fecha+"T00:00:00");
-  const out = [];
-  for(let i=days-1;i>=0;i--){
-    const dt = new Date(end);
-    dt.setDate(dt.getDate()-i);
-    const key = dt.toISOString().slice(0,10);
-    const count = state.despachos.filter(d=>d.fecha===key).length;
-    out.push({ label: dt.toLocaleDateString("es-CO",{day:"2-digit", month:"2-digit"}), value: count });
+// Número de despachos por día. En modo "día" muestra los últimos 7 días para
+// dar contexto; en semana/mes/rango muestra cada día del periodo elegido.
+function getDespachoTrendData(modo, fecha, desde, hasta){
+  let dias;
+  if(modo==="dia"){
+    const end = new Date(fecha+"T00:00:00");
+    dias = [];
+    for(let i=6;i>=0;i--){ const dt=new Date(end); dt.setDate(dt.getDate()-i); dias.push(dt.toISOString().slice(0,10)); }
+  } else {
+    dias = eachDayInRange(desde, hasta);
   }
-  return out;
+  return dias.map(key=>{
+    const count = state.despachos.filter(d=>d.fecha===key).length;
+    const [y,m,d] = key.split("-");
+    return { label: `${d}/${m}`, value: count };
+  });
 }
 
 let despachoChartInstance = null;
@@ -1134,15 +1236,16 @@ function drawDespachoResumenChart(){
   if(!canvas || typeof Chart === "undefined") return;
   if(despachoChartInstance){ despachoChartInstance.destroy(); despachoChartInstance = null; }
 
+  const [desde,hasta] = computeDateRange(state.despachoResumenModo, state.despachoResumenFecha, state.despachoResumenMes, state.despachoResumenRangoInicio, state.despachoResumenRangoFin);
   const type = state.despachoResumenChartType; // bar | pie | line
   let labels, data;
 
   if(type === "line"){
-    const trend = getDespachoTrendData(state.despachoResumenFecha, 7);
+    const trend = getDespachoTrendData(state.despachoResumenModo, state.despachoResumenFecha, desde, hasta);
     labels = trend.map(t=>t.label);
     data = trend.map(t=>t.value);
   } else {
-    const grouped = getDespachoGroupData(state.despachoResumenFecha, state.despachoResumenChartGroup);
+    const grouped = getDespachoGroupData(desde, hasta, state.despachoResumenChartGroup);
     labels = grouped.map(g=>g.label);
     data = grouped.map(g=>g.value);
   }
@@ -1187,20 +1290,21 @@ function drawDespachoResumenChart(){
 }
 
 function exportDespachoChartCSV(){
+  const [desde,hasta] = computeDateRange(state.despachoResumenModo, state.despachoResumenFecha, state.despachoResumenMes, state.despachoResumenRangoInicio, state.despachoResumenRangoFin);
   const type = state.despachoResumenChartType;
   let headers, rows, filename;
 
   if(type === "line"){
-    const trend = getDespachoTrendData(state.despachoResumenFecha, 7);
+    const trend = getDespachoTrendData(state.despachoResumenModo, state.despachoResumenFecha, desde, hasta);
     headers = ["Fecha","Despachos"];
     rows = [headers, ...trend.map(t=>[t.label, t.value])];
-    filename = `despachos_tendencia_${state.despachoResumenFecha}.csv`;
+    filename = `despachos_tendencia_${desde}_a_${hasta}.csv`;
   } else {
     const groupLabel = state.despachoResumenChartGroup==="cliente" ? "Cliente" : state.despachoResumenChartGroup==="producto" ? "Producto" : "Tipo";
-    const grouped = getDespachoGroupData(state.despachoResumenFecha, state.despachoResumenChartGroup);
+    const grouped = getDespachoGroupData(desde, hasta, state.despachoResumenChartGroup);
     headers = [groupLabel, "Despachos"];
     rows = [headers, ...grouped.map(g=>[g.label, g.value])];
-    filename = `despachos_${state.despachoResumenChartGroup}_${state.despachoResumenFecha}.csv`;
+    filename = `despachos_${state.despachoResumenChartGroup}_${desde}_a_${hasta}.csv`;
   }
 
   if(rows.length<=1){ toast("No hay datos para exportar"); return; }
@@ -1209,10 +1313,11 @@ function exportDespachoChartCSV(){
 
 function exportDespachoChartImage(){
   if(!despachoChartInstance){ toast("No hay gráfico para exportar"); return; }
+  const [desde,hasta] = computeDateRange(state.despachoResumenModo, state.despachoResumenFecha, state.despachoResumenMes, state.despachoResumenRangoInicio, state.despachoResumenRangoFin);
   const url = despachoChartInstance.toBase64Image("image/png", 1);
   const a = document.createElement("a");
   a.href = url;
-  a.download = `grafico_despachos_${state.despachoResumenChartType}_${state.despachoResumenFecha}.png`;
+  a.download = `grafico_despachos_${state.despachoResumenChartType}_${desde}_a_${hasta}.png`;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
@@ -1220,23 +1325,23 @@ function exportDespachoChartImage(){
 }
 
 function renderResumen(){
-  const fecha = state.resumenFecha;
-  const reports = state.reports.filter(r=>r.fecha===fecha);
+  const [desde,hasta] = computeDateRange(state.resumenModo, state.resumenFecha, state.resumenMes, state.resumenRangoInicio, state.resumenRangoFin);
+  const reports = state.reports.filter(r=>r.fecha>=desde && r.fecha<=hasta);
   const t = totalesGlobales(reports);
   const supervisores = new Set(reports.map(r=>r.supervisor)).size;
 
-  // Todos los items del día, con el reporte (finca/supervisor) al que pertenecen
-  const itemsDelDia = [];
-  reports.forEach(r=> r.items.forEach(it=> itemsDelDia.push({...it, finca:r.finca, supervisor:r.supervisor})));
+  // Todos los items del periodo, con el reporte (finca/supervisor) al que pertenecen
+  const itemsPeriodo = [];
+  reports.forEach(r=> r.items.forEach(it=> itemsPeriodo.push({...it, finca:r.finca, supervisor:r.supervisor})));
 
   const porProductoDetalle = PRODUCTOS.map(p=>{
-    const items = itemsDelDia.filter(it=>it.productoId===p.id);
+    const items = itemsPeriodo.filter(it=>it.productoId===p.id);
     const tot = items.reduce((a,it)=>{ a.unidades+=Number(it.unidades)||0; a.toneladas+=Number(it.toneladas)||0; return a; }, {unidades:0, toneladas:0});
     const porMedida = groupBy(items, it=>it.medida);
     return { producto:p, tot, porMedida };
   });
-  const porFinca = groupBy(itemsDelDia, it=>it.finca);
-  const porSupervisor = groupBy(itemsDelDia, it=>it.supervisor);
+  const porFinca = groupBy(itemsPeriodo, it=>it.finca);
+  const porSupervisor = groupBy(itemsPeriodo, it=>it.supervisor);
 
   const barra = (label, g, max, extra="")=>{
     const pct = max>0 ? Math.max(4, Math.round((g.toneladas/max)*100)) : 0;
@@ -1256,15 +1361,13 @@ function renderResumen(){
       <button class="icon-btn" id="btnBack">${ICONS.back}</button>
       <div>
         <span class="eyebrow">Todas las personas</span>
-        <h1 style="font-size:19px">Resumen del día</h1>
+        <h1 style="font-size:19px">Resumen</h1>
       </div>
       <div class="icon-btn" style="visibility:hidden">${ICONS.back}</div>
     </header>
     <main>
-      <div class="field" style="margin-top:4px;">
-        <label>Fecha</label>
-        <input class="control" type="date" id="resumenFechaInput" value="${fecha}">
-      </div>
+      ${renderPeriodPicker("resumen", state.resumenModo, state.resumenFecha, state.resumenMes, state.resumenRangoInicio, state.resumenRangoFin)}
+      <p style="font-size:12.5px; color:var(--ink-soft); margin:-4px 0 4px; text-transform:capitalize;">${formatRangeLabel(state.resumenModo, desde, hasta, state.resumenMes)}</p>
 
       <div class="stat-row">
         <div class="stat-card"><div class="n">${fmtNum(t.toneladas)}</div><div class="l">Toneladas</div></div>
@@ -1287,7 +1390,7 @@ function renderResumen(){
             <option value="supervisor" ${state.resumenChartGroup==="supervisor"?"selected":""}>Supervisor</option>
           </select>
         </div>` : `
-        <p style="font-size:12px; color:var(--ink-soft); margin:14px 0 0;">Toneladas totales de los últimos 7 días, de todas las personas.</p>`}
+        <p style="font-size:12px; color:var(--ink-soft); margin:14px 0 0;">${state.resumenModo==="dia" ? "Toneladas totales de los últimos 7 días." : "Toneladas totales por día, dentro del periodo elegido."}</p>`}
         <div style="height:220px; margin-top:16px;">
           <canvas id="resumenChart"></canvas>
         </div>
@@ -1298,7 +1401,7 @@ function renderResumen(){
       </div>
 
       ${reports.length===0 ? `
-        <div class="empty-state">Nadie ha registrado cosecha este día todavía.</div>
+        <div class="empty-state">Nadie ha registrado cosecha en este periodo todavía.</div>
       ` : `
         <div class="section-title"><h3>Por producto</h3><span class="count">Toca para ver detalle</span></div>
         ${porProductoDetalle.map(({producto:p, tot:pt, porMedida})=>{
@@ -1336,14 +1439,14 @@ function renderResumen(){
           ${porSupervisor.map(([nombre,g])=>barra(nombre,g,maxSup,` · ${g.count} registro${g.count!==1?"s":""}`)).join("")}
         </div>
 
-        <div class="section-title"><h3>Reportes del día</h3></div>
+        <div class="section-title"><h3>Reportes del periodo</h3></div>
         ${reports.sort((a,b)=>b.creado.localeCompare(a.creado)).map(r=>{
           const rt = totalesReporte(r);
           return `
           <div class="report-card" data-id="${r.id}">
             <div class="row1">
               <div class="predio">${r.finca || "(sin finca)"}</div>
-              <div class="fecha">${r.hora||""}</div>
+              <div class="fecha">${fmtFecha(r.fecha, r.hora)}</div>
             </div>
             <div class="meta">${r.supervisor || "—"} · ${r.equipo || "—"} · ${fmtNum(rt.toneladas)} t</div>
           </div>`;
@@ -1421,8 +1524,8 @@ function renderDespachos(){
 }
 
 function renderDespachoResumen(){
-  const fecha = state.despachoResumenFecha;
-  const despachos = state.despachos.filter(d=>d.fecha===fecha);
+  const [desde,hasta] = computeDateRange(state.despachoResumenModo, state.despachoResumenFecha, state.despachoResumenMes, state.despachoResumenRangoInicio, state.despachoResumenRangoFin);
+  const despachos = state.despachos.filter(d=>d.fecha>=desde && d.fecha<=hasta);
   const totCosecha = despachos.filter(d=>d.tipo==="cosecha").reduce((a,d)=>a+(Number(d.toneladas)||0),0);
   const totAserrinco = despachos.filter(d=>d.tipo==="aserrinco").reduce((a,d)=>a+(Number(d.unidades)||0),0);
   const clientes = new Set(despachos.map(d=>d.cliente)).size;
@@ -1437,10 +1540,8 @@ function renderDespachoResumen(){
       <div class="icon-btn" style="visibility:hidden">${ICONS.back}</div>
     </header>
     <main>
-      <div class="field" style="margin-top:4px;">
-        <label>Fecha</label>
-        <input class="control" type="date" id="despachoResumenFechaInput" value="${fecha}">
-      </div>
+      ${renderPeriodPicker("despachoResumen", state.despachoResumenModo, state.despachoResumenFecha, state.despachoResumenMes, state.despachoResumenRangoInicio, state.despachoResumenRangoFin)}
+      <p style="font-size:12.5px; color:var(--ink-soft); margin:-4px 0 4px; text-transform:capitalize;">${formatRangeLabel(state.despachoResumenModo, desde, hasta, state.despachoResumenMes)}</p>
 
       <div class="stat-row">
         <div class="stat-card"><div class="n">${despachos.length}</div><div class="l">Despachos · ${clientes} cliente${clientes!==1?"s":""}</div></div>
@@ -1463,7 +1564,7 @@ function renderDespachoResumen(){
             <option value="tipo" ${state.despachoResumenChartGroup==="tipo"?"selected":""}>Tipo de despacho</option>
           </select>
         </div>` : `
-        <p style="font-size:12px; color:var(--ink-soft); margin:14px 0 0;">Cantidad de despachos por día, últimos 7 días.</p>`}
+        <p style="font-size:12px; color:var(--ink-soft); margin:14px 0 0;">${state.despachoResumenModo==="dia" ? "Cantidad de despachos por día, últimos 7 días." : "Cantidad de despachos por día, dentro del periodo elegido."}</p>`}
         <div style="height:220px; margin-top:16px;">
           <canvas id="despachoResumenChart"></canvas>
         </div>
@@ -1474,9 +1575,9 @@ function renderDespachoResumen(){
       </div>
 
       ${despachos.length===0 ? `
-        <div class="empty-state">No hay despachos registrados este día.</div>
+        <div class="empty-state">No hay despachos registrados en este periodo.</div>
       ` : `
-        <div class="section-title"><h3>Despachos del día</h3></div>
+        <div class="section-title"><h3>Despachos del periodo</h3></div>
         ${despachos.sort((a,b)=>b.creado.localeCompare(a.creado)).map(d=>{
           const cfg = DESPACHO_TIPOS[d.tipo];
           const cantidad = d.tipo==="cosecha" ? `${fmtNum(d.toneladas)} t` : `${fmtNum(d.unidades)} u`;
@@ -1484,7 +1585,7 @@ function renderDespachoResumen(){
           <div class="report-card" data-id="${d.id}">
             <div class="row1">
               <div class="predio">${d.cliente || "(sin cliente)"}</div>
-              <div class="fecha">${d.hora||""}</div>
+              <div class="fecha">${fmtFecha(d.fecha, d.hora)}</div>
             </div>
             <div class="meta">${d.producto || "—"} · ${cfg.label} · ${cantidad}</div>
           </div>`;
@@ -1676,6 +1777,22 @@ function closeModal(){
 /* =========================================================
    RENDER PRINCIPAL + BINDINGS
    ========================================================= */
+// Conecta los eventos del selector de periodo (Día/Semana/Mes/Rango).
+// `keys` mapea a los nombres de campo en `state` (ej. resumenModo, resumenFecha…).
+function bindPeriodPicker(prefix, keys){
+  document.querySelectorAll("[data-periodo]").forEach(btn=>{
+    btn.onclick = ()=>{ state[keys.modo] = btn.dataset.periodo; render(); };
+  });
+  const fechaInput = document.getElementById(`${prefix}FechaInput`);
+  if(fechaInput) fechaInput.onchange = (e)=>{ state[keys.fecha] = e.target.value; render(); };
+  const mesInput = document.getElementById(`${prefix}MesInput`);
+  if(mesInput) mesInput.onchange = (e)=>{ state[keys.mes] = e.target.value; render(); };
+  const rangoInicioInput = document.getElementById(`${prefix}RangoInicioInput`);
+  if(rangoInicioInput) rangoInicioInput.onchange = (e)=>{ state[keys.rangoInicio] = e.target.value; render(); };
+  const rangoFinInput = document.getElementById(`${prefix}RangoFinInput`);
+  if(rangoFinInput) rangoFinInput.onchange = (e)=>{ state[keys.rangoFin] = e.target.value; render(); };
+}
+
 function render(){
   if(state.view!=="resumen" && resumenChartInstance){
     resumenChartInstance.destroy();
@@ -1711,6 +1828,7 @@ function bind(){
     };
     document.getElementById("btnResumen").onclick = ()=>{
       state.resumenFecha = new Date().toISOString().slice(0,10);
+      state.resumenModo = "dia";
       state.view = "resumen";
       render();
     };
@@ -1730,10 +1848,7 @@ function bind(){
 
   if(state.view==="resumen"){
     document.getElementById("btnBack").onclick = ()=>{ state.view="home"; render(); };
-    document.getElementById("resumenFechaInput").onchange = (e)=>{
-      state.resumenFecha = e.target.value;
-      render();
-    };
+    bindPeriodPicker("resumen", { modo:"resumenModo", fecha:"resumenFecha", mes:"resumenMes", rangoInicio:"resumenRangoInicio", rangoFin:"resumenRangoFin" });
     document.querySelectorAll("[data-toggle]").forEach(btn=>{
       btn.onclick = ()=>{
         const id = btn.dataset.toggle;
@@ -1768,6 +1883,7 @@ function bind(){
     document.getElementById("btnExportDespachos").onclick = exportDespachosCSV;
     document.getElementById("btnDespachoResumen").onclick = ()=>{
       state.despachoResumenFecha = new Date().toISOString().slice(0,10);
+      state.despachoResumenModo = "dia";
       state.view = "despachoResumen";
       render();
     };
@@ -1782,10 +1898,7 @@ function bind(){
 
   if(state.view==="despachoResumen"){
     document.getElementById("btnBack").onclick = ()=>{ state.view="despachos"; render(); };
-    document.getElementById("despachoResumenFechaInput").onchange = (e)=>{
-      state.despachoResumenFecha = e.target.value;
-      render();
-    };
+    bindPeriodPicker("despachoResumen", { modo:"despachoResumenModo", fecha:"despachoResumenFecha", mes:"despachoResumenMes", rangoInicio:"despachoResumenRangoInicio", rangoFin:"despachoResumenRangoFin" });
     document.querySelectorAll("[data-despchart]").forEach(btn=>{
       btn.onclick = ()=>{ state.despachoResumenChartType = btn.dataset.despchart; render(); };
     });
